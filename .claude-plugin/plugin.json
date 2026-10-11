@@ -1,0 +1,10 @@
+{
+  "name": "phro-pm-terms",
+  "version": "0.1.0",
+  "license": "MIT",
+  "description": "Collects IT terms and acronyms a PM should know from Claude's answers into a checklist pane; checked items move to an archive.",
+  "author": {
+    "name": "thatshoon"
+  },
+  "types": "./types/index.d.ts"
+}
