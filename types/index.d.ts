@@ -17,6 +17,9 @@ export type TermsDb = {
   ignored: string[]
 }
 
+/** Cumulative Haiku spend, kept in $.store under "usage". */
+export type Usage = { calls: number; failed: number; input: number; output: number; since: string }
+
 declare module 'claude-code' {
   interface PluginState {
     'phro-pm-terms': { terms: Term[]; isArchiveView: boolean }

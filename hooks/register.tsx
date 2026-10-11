@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, ModelCompleteResult, Register } from 'claude-code'
 
-import type { Term, TermsDb } from '../types'
+import type { Term, TermsDb, Usage } from '../types'
 
 const PANE = 'pm-terms'
 const terms = atom({ plugin: 'phro-pm-terms', key: 'terms' } as const, [])
@@ -11,6 +11,7 @@ const DB_PATH = '.claude/phro-pm-terms/terms.json'
 const MAX_CANDIDATES = 40
 const MAX_NEW = 8
 const MAX_IGNORED = 5000
+const MAX_SCAN_BATCHES = 5
 
 const STOPWORDS = new Set(
   'the and or of to in on for is are be it this that with as at by from an a if not no yes ok vs etc e g i e via per'.split(' '),
@@ -22,7 +23,8 @@ const SYSTEM = `You curate a glossary for an IT product manager (PM).
 Input: comma-separated candidate words taken from an AI coding assistant's answer.
 Rules:
 - Keep only terms a non-engineer PM gains from knowing: acronyms, tech concepts, dev-process and infra jargon.
-- Drop product/file/variable/function names, commands, generic English words, numbers.
+- Drop product, brand, repo, file, variable and function names, CLI commands and subcommands (e.g. "plugin update", "marketplace add"), generic English words, numbers.
+- Use only the given candidates; never add terms that are not among them.
 - Merge candidates that name the same thing (e.g. "hot", "reload" -> "Hot reload"; "CI" + "Continuous Integration") into one term.
 - At most ${MAX_NEW} terms. Output nothing else.
 Format, one term per line, Korean text for meaning and example:
@@ -50,25 +52,41 @@ function seenKeys(db: TermsDb): Set<string> {
   return seen
 }
 
-// ponytail: regex candidates catch acronyms, `code` words and English runs inside Korean text;
+/** Prose only: code, inline code, URLs and paths name things, they do not explain them. */
+export function prose(text: string): string {
+  return text
+    .replace(/```[\s\S]*?(```|$)/g, ' ')
+    .replace(/`[^`\n]*`/g, ' ')
+    .replace(/\]\([^)]*\)/g, '] ')
+    .replace(/\b[a-z][a-z0-9+.-]*:\/\/\S+/gi, ' ')
+    // paths: two or more separators, or one plus a file extension ("CI/CD" stays)
+    .replace(/(?:[\w.~:-]*[\\/]){2,}[\w.-]*|[\w.-]+[\\/][\w-]*\.\w+/g, ' ')
+}
+
+// Lookarounds keep a token whole: one glued to a word character, slash, @, $, dash or
+// a ".ext" is part of an identifier (repo/name, --flag, file.ts, 27ea05f) and is skipped.
+const ACRONYM = /(?<![\w/@$.-])[A-Z][A-Z0-9]{1,5}(?:\/[A-Z]{1,5})?(?=s?(?![\w/@(]|\.\w))/g
+const ENGLISH_RUN = /(?<![\w/@$.-])[A-Za-z][A-Za-z0-9+#]*(?:[ -][A-Za-z][A-Za-z0-9+#]*){0,2}(?![\w/@(]|\.\w)/g
+
+/** A commit hash or similar id: hex only, with a digit. */
+function isIdLike(word: string): boolean {
+  return /\d/.test(word) && /^[0-9a-f]{5,}$/i.test(word)
+}
+
+// ponytail: regex candidates catch acronyms and English runs inside Korean prose;
 // a concept written only in Korean (멱등성) is missed — add a Hangul noun pass if that matters
 export function candidates(text: string, db: TermsDb): string[] {
-  const found: string[] = []
-  for (const m of text.matchAll(/\b[A-Z][A-Z0-9]{1,5}(?:\/[A-Z]{1,5})?(?=s?\b)/g)) found.push(m[0])
-  for (const m of text.matchAll(/`([A-Za-z][A-Za-z0-9 -]{1,29})`/g)) found.push(m[1]!)
-  const hangul = (text.match(/[가-힣]/g) ?? []).length
-  if (hangul > text.length * 0.15) {
-    for (const m of text.matchAll(/[A-Za-z][A-Za-z0-9+#]*(?:[ -][A-Za-z][A-Za-z0-9+#]*){0,2}/g)) {
-      found.push(m[0])
-    }
-  }
+  const body = prose(text)
+  const found = [...body.matchAll(ACRONYM)].map(m => m[0])
+  const hangul = (body.match(/[가-힣]/g) ?? []).length
+  if (hangul > body.length * 0.15) found.push(...[...body.matchAll(ENGLISH_RUN)].map(m => m[0]))
 
   const seen = seenKeys(db)
   const out: string[] = []
   for (const raw of found) {
     const word = raw.trim()
     const key = normalize(word)
-    if (key.length < 2 || key.length > 40 || /^\d+$/.test(key)) continue
+    if (key.length < 2 || key.length > 40 || /^\d+$/.test(key) || isIdLike(word)) continue
     if (STOPWORDS.has(key) || seen.has(key)) continue
     seen.add(key)
     out.push(word)
@@ -119,9 +137,29 @@ export function merge(db: TermsDb, asked: readonly string[], parsed: readonly Pa
   }
 }
 
+export function addUsage(total: Usage | undefined, r: ModelCompleteResult): Usage {
+  const t = total ?? { calls: 0, failed: 0, input: 0, output: 0, since: new Date().toISOString().slice(0, 10) }
+  return {
+    ...t,
+    calls: t.calls + 1,
+    failed: t.failed + (r.isAnswered ? 0 : 1),
+    input: t.input + r.usage.input_tokens + r.usage.cache_read_input_tokens + r.usage.cache_creation_input_tokens,
+    output: t.output + r.usage.output_tokens,
+  }
+}
+
+export function formatUsage(u: Usage | undefined): string {
+  if (!u) return 'No Haiku calls yet.'
+  const per = (n: number) => Math.round(n / Math.max(1, u.calls))
+  return (
+    `Since ${u.since}: ${u.calls} Haiku calls (${u.failed} failed), ` +
+    `${u.input} input + ${u.output} output tokens (avg ${per(u.input)} in / ${per(u.output)} out per call).`
+  )
+}
+
 async function dbPath($: EngineInterface): Promise<string> {
   const home = (await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME'))
-  if (!home) throw new Error('pm-terms: neither USERPROFILE nor HOME is set')
+  if (!home) throw new Error('neither USERPROFILE nor HOME is set')
   return `${home}/${DB_PATH}`
 }
 
@@ -132,7 +170,7 @@ async function load($: EngineInterface): Promise<TermsDb> {
     () => false,
   )
   if (!exists) return emptyDb()
-  // a corrupt file throws here instead of being overwritten with an empty list
+  // a corrupt file throws here, so nothing below ever overwrites it with an empty list
   const db = JSON.parse(await $.fs.read(path)) as TermsDb
   return { version: 1, terms: db.terms ?? [], ignored: db.ignored ?? [] }
 }
@@ -142,8 +180,9 @@ async function save($: EngineInterface, db: TermsDb) {
   await update($, terms, () => db.terms)
 }
 
-// One read-modify-write at a time, so two extractions never miss each other's terms.
-// ponytail: module-level queue, reset on reload; fine for one session writing the file
+// One read-modify-write at a time within this session.
+// ponytail: in-process queue; two sessions writing at once can still race in the ms between
+// load and write (the Haiku call is outside that window) — a file lock if that ever bites
 let queue: Promise<unknown> = Promise.resolve()
 function serial<T>(fn: () => Promise<T>): Promise<T> {
   const run = queue.then(fn, fn)
@@ -151,58 +190,76 @@ function serial<T>(fn: () => Promise<T>): Promise<T> {
   return run
 }
 
-function extract($: EngineInterface, text: string): Promise<number> {
-  return serial(async () => {
-    const db = await load($)
-    const asked = candidates(text, db)
-    if (asked.length === 0) return 0
+/** Asks Haiku about one batch of unseen candidates; -1 when there were none to ask. */
+async function extract($: EngineInterface, text: string): Promise<number> {
+  const asked = candidates(text, await serial(() => load($)))
+  if (asked.length === 0) return -1
 
-    const r = await $.model.complete({
-      model: 'haiku',
-      system: SYSTEM,
-      prompt: asked.join(', '),
-      maxTokens: 120 * MAX_NEW,
-      effort: 'low',
-      timeoutMs: 30000,
-    })
-    if (!r.isAnswered) return 0 // nothing judged, nothing ignored
+  const r = await $.model.complete({
+    model: 'haiku',
+    system: SYSTEM,
+    prompt: asked.join(', '),
+    maxTokens: 120 * MAX_NEW,
+    effort: 'low',
+    timeoutMs: 30000,
+  })
+  await serial(async () => $.store.set('usage', addUsage((await $.store.get('usage')) as Usage | undefined, r)))
+  if (!r.isAnswered) return 0 // nothing judged, nothing ignored
 
-    const { db: next, added } = merge(db, asked, parseReply(r.text))
-    await save($, next)
-    if (added > 0) $.ui.toast(`📘 PM 용어 ${added}개 추가 — /pm-terms`)
+  // merge into the file as it is now, not as it was before the call
+  const added = await serial(async () => {
+    const { db, added } = merge(await load($), asked, parseReply(r.text))
+    await save($, db)
     return added
   })
+  if (added > 0) $.ui.toast(`📘 PM 용어 ${added}개 추가 — /pm-terms`)
+  return added
+}
+
+function reportFailure($: EngineInterface, err: unknown) {
+  $.ui.toast(`pm-terms: ${DB_PATH} 를 읽거나 쓰지 못했습니다 (${String(err).slice(0, 120)})`)
 }
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
-    const db = await serial(() => load($))
-    await update($, terms, () => db.terms)
     await $.command.register({
       name: 'pm-terms',
-      description: 'Open the PM terms checklist ("scan" extracts from this whole session)',
-      argumentHint: '[scan]',
+      description: 'Open the PM terms checklist ("scan" extracts from this session, "stats" shows Haiku token use)',
+      argumentHint: '[scan|stats]',
     })
+    await serial(() => load($))
+      .then(db => update($, terms, () => db.terms))
+      .catch(err => reportFailure($, err))
     return next(e)
   })
 
   on('command.run', { command: 'pm-terms' }, async ($, e) => {
+    const arg = e.args.trim()
+    if (arg === 'stats') return { text: formatUsage((await $.store.get('usage')) as Usage | undefined) }
+
     await $.ui.open({ id: PANE, title: 'PM 용어' })
-    if (e.args.trim() !== 'scan') return { text: 'PM terms pane opened.' }
+    if (arg !== 'scan') return { text: 'PM terms pane opened.' }
 
     const answers = (await $.session.messages())
       .filter(m => m.role === 'assistant' && m.text)
       .map(m => m.text)
       .join('\n\n')
-    const added = await extract($, answers)
-    return { text: `Scanned this session: ${added} new PM terms.` }
+    let total = 0
+    for (let i = 0; i < MAX_SCAN_BATCHES; i++) {
+      const added = await extract($, answers)
+      if (added < 0) break
+      total += added
+    }
+    return { text: `Scanned this session: ${total} new PM terms.` }
   })
 
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
     if (e.agentId === undefined && e.reason === 'answer' && e.answer) {
       const answer = e.answer
-      $.clock.after(0, () => void extract($, answer))
+      $.clock.after(0, () => {
+        extract($, answer).catch(err => reportFailure($, err))
+      })
     }
     return result
   })
@@ -219,7 +276,7 @@ export const register: Register = on => {
       serial(async () => {
         const db = await load($)
         await save($, { ...db, terms: db.terms.map(t => (t.key === key ? { ...t, isDone: !t.isDone } : t)) })
-      })
+      }).catch(err => reportFailure($, err))
 
     return (
       <Box flexDirection="column">

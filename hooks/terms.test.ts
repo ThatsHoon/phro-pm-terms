@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { candidates, emptyDb, merge, normalize, parseReply } from './register'
+import { addUsage, candidates, emptyDb, formatUsage, merge, normalize, parseReply } from './register'
 
 test('normalize folds case, spacing, punctuation and notes', async () => {
   expect(normalize('Hot reload')).toBe(normalize('hot-reload'))
@@ -36,4 +36,22 @@ test('merge dedupes by key and alias, ignores unclaimed candidates', async () =>
   ])
   expect(second.added).toBe(0)
   expect(second.db.terms.length).toBe(1)
+})
+
+test('candidates skip code, URLs, paths, ids and identifier fragments', async () => {
+  const text = [
+    '커밋 27ea05f 와 a8b178c 를 https://github.com/ThatsHoon/phro 에 push 했고 CI/CD 와 OAuth 를 씁니다.',
+    '`phro-pm-terms` 와 hooks/register.tsx 수정, ThatsHoon/phro 저장소, --force 옵션.',
+    '```bash',
+    'claude plugin update phro-pm-terms@phro',
+    '```',
+  ].join('\n')
+  expect(candidates(text, emptyDb())).toEqual(['CI/CD', 'push', 'OAuth'])
+})
+
+test('usage adds up across calls', async () => {
+  const ok = { isAnswered: true, text: '', usage: { input_tokens: 100, output_tokens: 20, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } as const
+  const u = addUsage(addUsage(undefined, ok as never), { ...ok, isAnswered: false, reason: 'empty-reply' } as never)
+  expect([u.calls, u.failed, u.input, u.output]).toEqual([2, 1, 200, 40])
+  expect(formatUsage(u)).toContain('avg 100 in / 20 out')
 })
