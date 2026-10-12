@@ -1,12 +1,15 @@
+/** Which tab a term sits in: to learn, archived, or removed. Removed terms stay for dedup. */
+export type Status = 'todo' | 'done' | 'removed'
+
 export type Term = {
   /** normalize(term): the dedup key */
   key: string
   term: string
-  /** normalized other names (full name, Korean name, spelling variants) */
+  /** normalized other names (full name, Korean name, spelling variants, initials) */
   aliases: string[]
   meaning: string
   example: string
-  isDone: boolean
+  status: Status
 }
 
 /** ~/.claude/phro-pm-terms/terms.json */
@@ -22,6 +25,6 @@ export type Usage = { calls: number; failed: number; input: number; output: numb
 
 declare module 'claude-code' {
   interface PluginState {
-    'phro-pm-terms': { terms: Term[]; isArchiveView: boolean }
+    'phro-pm-terms': { terms: Term[]; tab: Status }
   }
 }

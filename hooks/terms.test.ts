@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { addUsage, candidates, emptyDb, formatUsage, merge, normalize, parseReply } from './register'
+import { addUsage, candidates, emptyDb, formatUsage, initials, merge, migrate, normalize, parseReply } from './register'
 
 test('normalize folds case, spacing, punctuation and notes', async () => {
   expect(normalize('Hot reload')).toBe(normalize('hot-reload'))
@@ -54,4 +54,32 @@ test('usage adds up across calls', async () => {
   const u = addUsage(addUsage(undefined, ok as never), { ...ok, isAnswered: false, reason: 'empty-reply' } as never)
   expect([u.calls, u.failed, u.input, u.output]).toEqual([2, 1, 200, 40])
   expect(formatUsage(u)).toContain('avg 100 in / 20 out')
+})
+
+test('a reworded explanation or another name of a known term is no new term', async () => {
+  const base = merge(emptyDb(), ['API'], [{ term: 'API', aliases: [], meaning: '프로그램끼리 대화하는 규약', example: 'e' }]).db
+  const reworded = merge(base, ['API'], [{ term: 'API', aliases: [], meaning: '전혀 다른 설명', example: '다른 예시' }])
+  expect(reworded.added).toBe(0)
+  expect(reworded.db.terms[0]!.meaning).toBe('프로그램끼리 대화하는 규약')
+
+  const ci = merge(emptyDb(), ['CI'], [{ term: 'CI', aliases: [], meaning: 'm', example: 'e' }]).db
+  expect(merge(ci, ['x'], [{ term: 'Continuous Integration', aliases: [], meaning: 'm', example: 'e' }]).added).toBe(0)
+  expect(initials('Continuous Integration')).toBe('ci')
+  expect(initials('API')).toBe(undefined)
+})
+
+test('removed terms still count as known', async () => {
+  const db = merge(emptyDb(), ['CI'], [{ term: 'CI', aliases: [], meaning: 'm', example: 'e' }]).db
+  const removed = { ...db, terms: db.terms.map(t => ({ ...t, status: 'removed' as const })) }
+  expect(merge(removed, ['CI'], [{ term: 'ci', aliases: [], meaning: 'm2', example: 'e2' }]).added).toBe(0)
+  expect(candidates('CI 를 씁니다', removed)).toEqual([])
+})
+
+test('migrate turns isDone into a status', async () => {
+  const db = migrate({ terms: [
+    { key: 'a', term: 'A', aliases: [], meaning: 'm', example: 'e', isDone: true } as never,
+    { key: 'b', term: 'B', aliases: [], meaning: 'm', example: 'e', isDone: false } as never,
+  ] })
+  expect(db.terms.map(t => t.status)).toEqual(['done', 'todo'])
+  expect('isDone' in db.terms[0]!).toBe(false)
 })

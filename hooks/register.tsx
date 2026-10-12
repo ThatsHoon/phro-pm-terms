@@ -1,13 +1,15 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, ModelCompleteResult, Register } from 'claude-code'
 
-import type { Term, TermsDb, Usage } from '../types'
+import type { Status, Term, TermsDb, Usage } from '../types'
 
 const PANE = 'pm-terms'
 const terms = atom({ plugin: 'phro-pm-terms', key: 'terms' } as const, [])
-const isArchiveView = atom({ plugin: 'phro-pm-terms', key: 'isArchiveView' } as const, false)
+const tab = atom({ plugin: 'phro-pm-terms', key: 'tab' } as const, 'todo')
 
 const DB_PATH = '.claude/phro-pm-terms/terms.json'
+// The file is the one source of truth shared by every session; each polls its mtime.
+const POLL_MS = 3000
 const MAX_CANDIDATES = 40
 const MAX_NEW = 8
 const MAX_IGNORED = 5000
@@ -48,6 +50,8 @@ function seenKeys(db: TermsDb): Set<string> {
   for (const t of db.terms) {
     seen.add(t.key)
     for (const a of t.aliases) seen.add(a)
+    const short = initials(t.term) // terms saved before initials became aliases
+    if (short) seen.add(short)
   }
   return seen
 }
@@ -109,18 +113,30 @@ export function parseReply(text: string): Parsed[] {
   return out
 }
 
-/** Adds the new terms (deduped by key and aliases) and ignores every candidate no term claimed. */
+/** "Continuous Integration" -> "ci": lets an acronym and its spelled-out form meet. */
+// ponytail: initials can collide (Hot reload vs HR); fine for a PM glossary, drop if it misfires
+export function initials(term: string): string | undefined {
+  const words = term.split(/[\s-]+/).filter(w => /^[A-Za-z]/.test(w))
+  return words.length >= 2 && words.length <= 6 ? words.map(w => w[0]!.toLowerCase()).join('') : undefined
+}
+
+/**
+ * Adds the new terms and ignores every candidate no term claimed. A term is new only when
+ * none of its names (key, aliases, initials) is already known in any tab, removed included;
+ * the meaning and example Haiku wrote never matter, so a reworded explanation is no new term.
+ */
 export function merge(db: TermsDb, asked: readonly string[], parsed: readonly Parsed[]): { db: TermsDb; added: number } {
   const seen = seenKeys(db)
   const fresh: Term[] = []
   const claimed = new Set<string>()
   for (const p of parsed) {
     const key = normalize(p.term)
-    const aliases = [...new Set(p.aliases.map(normalize))].filter(a => a && a !== key)
+    const names = [...p.aliases.map(normalize), initials(p.term) ?? '']
+    const aliases = [...new Set(names)].filter(a => a && a !== key)
     for (const k of [key, ...aliases]) claimed.add(k)
     if (!key || [key, ...aliases].some(k => seen.has(k))) continue
     for (const k of [key, ...aliases]) seen.add(k)
-    fresh.push({ key, term: p.term, aliases, meaning: p.meaning, example: p.example, isDone: false })
+    fresh.push({ key, term: p.term, aliases, meaning: p.meaning, example: p.example, status: 'todo' })
   }
   const words = (s: string) => s.toLowerCase().split(/[ -]/).map(normalize)
   const claimedWords = new Set(parsed.flatMap(p => words(p.term)))
@@ -163,6 +179,17 @@ async function dbPath($: EngineInterface): Promise<string> {
   return `${home}/${DB_PATH}`
 }
 
+/** Older files carried `isDone` instead of `status`. */
+type StoredTerm = Omit<Term, 'status'> & { status?: Status; isDone?: boolean }
+
+export function migrate(raw: { terms?: StoredTerm[]; ignored?: string[] }): TermsDb {
+  const terms = (raw.terms ?? []).map(({ isDone, status, ...t }): Term => ({
+    ...t,
+    status: status ?? (isDone ? 'done' : 'todo'),
+  }))
+  return { version: 1, terms, ignored: raw.ignored ?? [] }
+}
+
 async function load($: EngineInterface): Promise<TermsDb> {
   const path = await dbPath($)
   const exists = await $.fs.stat(path).then(
@@ -171,12 +198,22 @@ async function load($: EngineInterface): Promise<TermsDb> {
   )
   if (!exists) return emptyDb()
   // a corrupt file throws here, so nothing below ever overwrites it with an empty list
-  const db = JSON.parse(await $.fs.read(path)) as TermsDb
-  return { version: 1, terms: db.terms ?? [], ignored: db.ignored ?? [] }
+  return migrate(JSON.parse(await $.fs.read(path)))
+}
+
+// mtime of the file as this session last read or wrote it; another session's write moves it
+let lastMtime = -1
+
+async function mtime($: EngineInterface): Promise<number> {
+  return $.fs.stat(await dbPath($)).then(
+    s => s.mtimeMs,
+    () => 0,
+  )
 }
 
 async function save($: EngineInterface, db: TermsDb) {
   await $.fs.write(await dbPath($), JSON.stringify(db, null, 1) + '\n')
+  lastMtime = await mtime($)
   await update($, terms, () => db.terms)
 }
 
@@ -188,6 +225,17 @@ function serial<T>(fn: () => Promise<T>): Promise<T> {
   const run = queue.then(fn, fn)
   queue = run.catch(() => undefined)
   return run
+}
+
+/** Picks up what another session wrote: the pane redraws from the file whenever its mtime moved. */
+function refresh($: EngineInterface): Promise<void> {
+  return serial(async () => {
+    const now = await mtime($)
+    if (now === lastMtime) return
+    lastMtime = now // set first: a corrupt file is reported once per change, not every poll
+    const db = await load($)
+    await update($, terms, () => db.terms)
+  })
 }
 
 /** Asks Haiku about one batch of unseen candidates; -1 when there were none to ask. */
@@ -216,9 +264,23 @@ async function extract($: EngineInterface, text: string): Promise<number> {
   return added
 }
 
+/** Moves one term to a tab; idempotent, so a press on a stale row never flips it back. */
+function setStatus($: EngineInterface, key: string, status: Status): Promise<void> {
+  return serial(async () => {
+    const db = await load($)
+    await save($, { ...db, terms: db.terms.map(t => (t.key === key ? { ...t, status } : t)) })
+  })
+}
+
 function reportFailure($: EngineInterface, err: unknown) {
   $.ui.toast(`pm-terms: ${DB_PATH} 를 읽거나 쓰지 못했습니다 (${String(err).slice(0, 120)})`)
 }
+
+const TABS: { status: Status; label: string; empty: string }[] = [
+  { status: 'todo', label: '배울 용어', empty: '아직 용어가 없습니다. /pm-terms scan 으로 이 세션을 훑어보세요.' },
+  { status: 'done', label: '보관', empty: '보관한 용어가 없습니다.' },
+  { status: 'removed', label: '제거', empty: '제거한 용어가 없습니다. 제거한 용어는 다시 추가되지 않습니다.' },
+]
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
@@ -227,9 +289,10 @@ export const register: Register = on => {
       description: 'Open the PM terms checklist ("scan" extracts from this session, "stats" shows Haiku token use)',
       argumentHint: '[scan|stats]',
     })
-    await serial(() => load($))
-      .then(db => update($, terms, () => db.terms))
-      .catch(err => reportFailure($, err))
+    await refresh($).catch(err => reportFailure($, err))
+    $.clock.every(POLL_MS, () => {
+      refresh($).catch(err => reportFailure($, err))
+    })
     return next(e)
   })
 
@@ -267,44 +330,40 @@ export const register: Register = on => {
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Button, Text } = $.ui.resolve(e)
     const list = await read($, terms)
-    const showArchive = await read($, isArchiveView)
-    const todo = list.filter(t => !t.isDone)
-    const done = list.filter(t => t.isDone)
-    const shown = showArchive ? done : todo
-
-    const toggle = (key: string) =>
-      serial(async () => {
-        const db = await load($)
-        await save($, { ...db, terms: db.terms.map(t => (t.key === key ? { ...t, isDone: !t.isDone } : t)) })
-      }).catch(err => reportFailure($, err))
+    const current = await read($, tab)
+    const shown = list.filter(t => t.status === current)
+    const move = (key: string, status: Status) => () => setStatus($, key, status).catch(err => reportFailure($, err))
 
     return (
       <Box flexDirection="column">
         <Box>
-          <Button
-            key="tab-todo"
-            label={`학습할 용어 (${todo.length})`}
-            variant={showArchive ? 'secondary' : 'primary'}
-            onPress={() => update($, isArchiveView, () => false)}
-          />
-          <Button
-            key="tab-archive"
-            label={`보관함 (${done.length})`}
-            variant={showArchive ? 'primary' : 'secondary'}
-            onPress={() => update($, isArchiveView, () => true)}
-          />
+          {TABS.map(t => (
+            <Button
+              key={`tab-${t.status}`}
+              label={`${t.label} (${list.filter(x => x.status === t.status).length})`}
+              variant={t.status === current ? 'primary' : 'secondary'}
+              onPress={() => update($, tab, () => t.status)}
+            />
+          ))}
         </Box>
-        {shown.length === 0 && (
-          <Text dimColor>
-            {showArchive ? '보관함이 비어 있습니다.' : '아직 용어가 없습니다. /pm-terms scan 으로 이 세션을 훑어보세요.'}
-          </Text>
-        )}
+        {shown.length === 0 && <Text dimColor>{TABS.find(t => t.status === current)!.empty}</Text>}
         {shown.map(t => (
           <Box key={`row-${t.key}`} flexDirection="column" marginTop={1}>
-            <Button key={`check-${t.key}`} plain onPress={() => toggle(t.key)}>
-              {t.isDone ? '☑ ' : '☐ '}
-              <Text bold>{t.term}</Text>
-            </Button>
+            <Box>
+              {current === 'removed' ? (
+                <Text bold>✕ {t.term} </Text>
+              ) : (
+                <Button key={`check-${t.key}`} plain onPress={move(t.key, current === 'todo' ? 'done' : 'todo')}>
+                  {current === 'done' ? '☑ ' : '☐ '}
+                  <Text bold>{t.term}</Text>
+                </Button>
+              )}
+              {current === 'removed' ? (
+                <Button key={`restore-${t.key}`} label="복원" onPress={move(t.key, 'todo')} />
+              ) : (
+                <Button key={`remove-${t.key}`} label="제거" onPress={move(t.key, 'removed')} />
+              )}
+            </Box>
             <Text>  {t.meaning}</Text>
             <Text dimColor>  예) {t.example}</Text>
           </Box>
