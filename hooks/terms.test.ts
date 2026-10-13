@@ -68,6 +68,15 @@ test('a reworded explanation or another name of a known term is no new term', as
   expect(initials('API')).toBe(undefined)
 })
 
+test('an acronym written with its full name keeps the acronym as key and the full name as alias', async () => {
+  const db = merge(emptyDb(), ['WER'], [{ term: 'WER(Word Error Rate)', aliases: [], meaning: 'm', example: 'e' }]).db
+  expect(db.terms[0]!.key).toBe('wer')
+  expect(db.terms[0]!.aliases).toEqual(['worderrorrate'])
+  expect(initials('WER(Word Error Rate)')).toBe(undefined)
+  expect(merge(db, ['x'], [{ term: 'Word Error Rate', aliases: [], meaning: 'm', example: 'e' }]).added).toBe(0)
+  expect(candidates('WER 이 낮다', db)).toEqual([])
+})
+
 test('removed terms still count as known', async () => {
   const db = merge(emptyDb(), ['CI'], [{ term: 'CI', aliases: [], meaning: 'm', example: 'e' }]).db
   const removed = { ...db, terms: db.terms.map(t => ({ ...t, status: 'removed' as const })) }

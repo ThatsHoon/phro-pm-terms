@@ -29,6 +29,7 @@ Rules:
 - Use only the given candidates; never add terms that are not among them.
 - Merge candidates that name the same thing (e.g. "hot", "reload" -> "Hot reload"; "CI" + "Continuous Integration") into one term.
 - At most ${MAX_NEW} terms. Output nothing else.
+- If the term is an acronym or abbreviation, write it with its English full name in parentheses, no space: "WER(Word Error Rate)", "CI/CD(Continuous Integration/Continuous Delivery)", "bf16(Brain Floating Point 16)". A term already spelled out ("Hot reload", "Smoke test") stays as is.
 Format, one term per line, Korean text for meaning and example:
 term | aliases separated by ; (full name, Korean name, spelling variants; may be empty) | meaning (one sentence, max 60 chars) | example (one real-world use, max 60 chars)
 If none qualify, output a single line: -`
@@ -116,7 +117,8 @@ export function parseReply(text: string): Parsed[] {
 /** "Continuous Integration" -> "ci": lets an acronym and its spelled-out form meet. */
 // ponytail: initials can collide (Hot reload vs HR); fine for a PM glossary, drop if it misfires
 export function initials(term: string): string | undefined {
-  const words = term.split(/[\s-]+/).filter(w => /^[A-Za-z]/.test(w))
+  // "WER(Word Error Rate)": the name is WER; its full name becomes an alias in merge()
+  const words = term.replace(/\([^)]*\)/g, ' ').split(/[\s-]+/).filter(w => /^[A-Za-z]/.test(w))
   return words.length >= 2 && words.length <= 6 ? words.map(w => w[0]!.toLowerCase()).join('') : undefined
 }
 
@@ -131,7 +133,8 @@ export function merge(db: TermsDb, asked: readonly string[], parsed: readonly Pa
   const claimed = new Set<string>()
   for (const p of parsed) {
     const key = normalize(p.term)
-    const names = [...p.aliases.map(normalize), initials(p.term) ?? '']
+    const spelled = [...p.term.matchAll(/\(([^)]*)\)/g)].map(m => normalize(m[1]!)) // "WER(Word Error Rate)" -> worderrorrate
+    const names = [...p.aliases.map(normalize), ...spelled, initials(p.term) ?? '']
     const aliases = [...new Set(names)].filter(a => a && a !== key)
     for (const k of [key, ...aliases]) claimed.add(k)
     if (!key || [key, ...aliases].some(k => seen.has(k))) continue
