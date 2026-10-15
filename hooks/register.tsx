@@ -214,10 +214,25 @@ async function mtime($: EngineInterface): Promise<number> {
   )
 }
 
+/** Same terms in the same order: then a redraw would change nothing on screen. */
+export function sameTerms(a: readonly Term[], b: readonly Term[]): boolean {
+  return a.length === b.length && JSON.stringify(a) === JSON.stringify(b)
+}
+
+/**
+ * Redraws the pane only when the list changed. Every redraw hands the surface new button
+ * handles, so a press already on its way lands on a dead handle ("ui_press not handled").
+ * Most file writes change only `ignored` (an extraction that found nothing new), and every
+ * session polls the file, so redrawing on each write voided presses all day.
+ */
+async function show($: EngineInterface, list: Term[]) {
+  if (!sameTerms(await read($, terms), list)) await update($, terms, () => list)
+}
+
 async function save($: EngineInterface, db: TermsDb) {
   await $.fs.write(await dbPath($), JSON.stringify(db, null, 1) + '\n')
   lastMtime = await mtime($)
-  await update($, terms, () => db.terms)
+  await show($, db.terms)
 }
 
 // One read-modify-write at a time within this session.
@@ -230,14 +245,13 @@ function serial<T>(fn: () => Promise<T>): Promise<T> {
   return run
 }
 
-/** Picks up what another session wrote: the pane redraws from the file whenever its mtime moved. */
+/** Picks up what another session wrote: the pane redraws when the file's terms changed. */
 function refresh($: EngineInterface): Promise<void> {
   return serial(async () => {
     const now = await mtime($)
     if (now === lastMtime) return
     lastMtime = now // set first: a corrupt file is reported once per change, not every poll
-    const db = await load($)
-    await update($, terms, () => db.terms)
+    await show($, (await load($)).terms)
   })
 }
 

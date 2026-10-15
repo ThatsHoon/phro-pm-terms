@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { addUsage, candidates, emptyDb, formatUsage, initials, merge, migrate, normalize, parseReply } from './register'
+import { addUsage, candidates, emptyDb, formatUsage, initials, merge, migrate, normalize, parseReply, sameTerms } from './register'
 
 test('normalize folds case, spacing, punctuation and notes', async () => {
   expect(normalize('Hot reload')).toBe(normalize('hot-reload'))
@@ -91,4 +91,20 @@ test('migrate turns isDone into a status', async () => {
   ] })
   expect(db.terms.map(t => t.status)).toEqual(['done', 'todo'])
   expect('isDone' in db.terms[0]!).toBe(false)
+})
+
+test('an extraction that adds no term leaves the list as it was, so the pane is not redrawn', async () => {
+  const db = merge(emptyDb(), ['api'], [{ term: 'API(Application Programming Interface)', aliases: [], meaning: 'm', example: 'e' }]).db
+  const next = merge(db, ['foo', 'bar'], []).db
+  expect(next.ignored.length).toBe(db.ignored.length + 2)
+  expect(sameTerms(next.terms, db.terms)).toBe(true)
+  const more = merge(next, ['ci'], [{ term: 'CI(Continuous Integration)', aliases: [], meaning: 'm', example: 'e' }]).db
+  expect(sameTerms(more.terms, next.terms)).toBe(false)
+})
+
+test('what Haiku is sent does not grow with the glossary', async () => {
+  let db = emptyDb()
+  for (let i = 0; i < 300; i++) db = merge(db, [], [{ term: `Term ${i} word`, aliases: [], meaning: 'm', example: 'e' }]).db
+  const words = Array.from({ length: 60 }, (_, i) => 'Q' + String.fromCharCode(65 + (i % 26)) + String.fromCharCode(65 + Math.floor(i / 26)))
+  expect(candidates('새 답변입니다 ' + words.join(' ') + ' 끝', db).length).toBe(40)
 })
