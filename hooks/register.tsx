@@ -1,11 +1,13 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, ModelCompleteResult, Register } from 'claude-code'
 
-import type { Status, Term, TermsDb, Usage } from '../types'
+import type { Order, Status, Term, TermsDb, Usage } from '../types'
 
 const PANE = 'pm-terms'
 const terms = atom({ plugin: 'phro-pm-terms', key: 'terms' } as const, [])
 const tab = atom({ plugin: 'phro-pm-terms', key: 'tab' } as const, 'todo')
+const query = atom({ plugin: 'phro-pm-terms', key: 'query' } as const, '')
+const order = atom({ plugin: 'phro-pm-terms', key: 'order' } as const, 'time')
 
 const DB_PATH = '.claude/phro-pm-terms/terms.json'
 // The file is the one source of truth shared by every session; each polls its mtime.
@@ -293,6 +295,45 @@ function reportFailure($: EngineInterface, err: unknown) {
   $.ui.toast(`pm-terms: ${DB_PATH} 를 읽거나 쓰지 못했습니다 (${String(err).slice(0, 120)})`)
 }
 
+const ORDERS: { value: Order; label: string }[] = [
+  { value: 'time', label: '시간순(최신 먼저)' },
+  { value: 'abc', label: 'abc순' },
+  { value: 'ganada', label: '가나다순' },
+]
+
+const HANGUL = /[가-힣]/
+const ko = new Intl.Collator('ko', { sensitivity: 'base', numeric: true })
+const en = new Intl.Collator('en', { sensitivity: 'base', numeric: true })
+
+/** The Korean name Haiku gave as an alias ("핫리로드"), else the term itself. */
+function koName(t: Term): string {
+  return t.aliases.find(a => HANGUL.test(a)) ?? t.term
+}
+
+/**
+ * The rows a tab shows: those matching the search (term, its other names, meaning or example,
+ * case and spacing ignored), in the chosen order. Terms are stored newest first, so "time"
+ * keeps the stored order. "abc" puts Latin names first, "ganada" Korean names first.
+ */
+export function visible(list: readonly Term[], status: Status, q: string, by: Order): Term[] {
+  const needle = q.trim().toLowerCase()
+  const key = normalize(q)
+  const hit = (t: Term) =>
+    !needle ||
+    [t.term, t.meaning, t.example].some(s => s.toLowerCase().includes(needle)) ||
+    (key !== '' && [t.key, ...t.aliases].some(a => a.includes(key)))
+  const rows = list.filter(t => t.status === status && hit(t))
+  if (by === 'time') return rows
+  const name = by === 'abc' ? (t: Term) => t.term : koName
+  const first = (s: string) => (HANGUL.test(s[0] ?? '') === (by === 'ganada') ? 0 : 1)
+  const cmp = by === 'abc' ? en : ko
+  return rows.sort((a, b) => first(name(a)) - first(name(b)) || cmp.compare(name(a), name(b)))
+}
+
+/** The text an Input handler got: the value itself, or an event carrying it. */
+const text = (v: unknown): string =>
+  typeof v === 'string' ? v : typeof (v as { value?: unknown })?.value === 'string' ? (v as { value: string }).value : ''
+
 const TABS: { status: Status; label: string; empty: string }[] = [
   { status: 'todo', label: '배울 용어', empty: '아직 용어가 없습니다. /pm-terms scan 으로 이 세션을 훑어보세요.' },
   { status: 'done', label: '보관', empty: '보관한 용어가 없습니다.' },
@@ -345,10 +386,13 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Button, Text } = $.ui.resolve(e)
+    const { Box, Button, Text, Input, Select } = $.ui.resolve(e)
     const list = await read($, terms)
     const current = await read($, tab)
-    const shown = list.filter(t => t.status === current)
+    const q = await read($, query)
+    const by = await read($, order)
+    const shown = visible(list, current, q, by)
+    const search = (v: unknown) => update($, query, () => text(v))
     const move = (key: string, status: Status) => () => setStatus($, key, status).catch(err => reportFailure($, err))
 
     return (
@@ -363,7 +407,13 @@ export const register: Register = on => {
             />
           ))}
         </Box>
-        {shown.length === 0 && <Text dimColor>{TABS.find(t => t.status === current)!.empty}</Text>}
+        <Box>
+          <Input key="search" label="검색" placeholder="용어, 뜻, 예시, 한글 이름" value={q} submitLabel="찾기" onInput={search} onSubmit={search} />
+          <Select key="order" label="정렬" options={ORDERS} value={by} onSelect={(v: unknown) => update($, order, () => (ORDERS.find(o => o.value === text(v))?.value ?? 'time'))} />
+          {q && <Button key="clear" label="검색 지우기" onPress={() => update($, query, () => '')} />}
+        </Box>
+        {q && <Text dimColor>"{q}" 검색 결과 {shown.length}개</Text>}
+        {shown.length === 0 && <Text dimColor>{q ? '검색과 맞는 용어가 없습니다.' : TABS.find(t => t.status === current)!.empty}</Text>}
         {shown.map(t => (
           <Box key={`row-${t.key}`} flexDirection="column" marginTop={1}>
             <Box>

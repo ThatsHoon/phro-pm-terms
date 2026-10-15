@@ -1,6 +1,6 @@
 {
   "name": "phro-pm-terms",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "license": "MIT",
   "description": "Collects IT terms and acronyms a PM should know from Claude's answers into a checklist pane; checked items move to an archive.",
   "author": {

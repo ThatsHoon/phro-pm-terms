@@ -20,11 +20,14 @@ export type TermsDb = {
   ignored: string[]
 }
 
+/** How the pane sorts a tab: newest first (stored order), Latin names A-Z first, Korean names 가-힣 first. */
+export type Order = 'time' | 'abc' | 'ganada'
+
 /** Cumulative Haiku spend, kept in $.store under "usage". */
 export type Usage = { calls: number; failed: number; input: number; output: number; since: string }
 
 declare module 'claude-code' {
   interface PluginState {
-    'phro-pm-terms': { terms: Term[]; tab: Status }
+    'phro-pm-terms': { terms: Term[]; tab: Status; query: string; order: Order }
   }
 }

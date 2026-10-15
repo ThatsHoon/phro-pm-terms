@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { addUsage, candidates, emptyDb, formatUsage, initials, merge, migrate, normalize, parseReply, sameTerms } from './register'
+import { addUsage, candidates, emptyDb, formatUsage, initials, merge, migrate, normalize, parseReply, sameTerms, visible } from './register'
 
 test('normalize folds case, spacing, punctuation and notes', async () => {
   expect(normalize('Hot reload')).toBe(normalize('hot-reload'))
@@ -107,4 +107,25 @@ test('what Haiku is sent does not grow with the glossary', async () => {
   for (let i = 0; i < 300; i++) db = merge(db, [], [{ term: `Term ${i} word`, aliases: [], meaning: 'm', example: 'e' }]).db
   const words = Array.from({ length: 60 }, (_, i) => 'Q' + String.fromCharCode(65 + (i % 26)) + String.fromCharCode(65 + Math.floor(i / 26)))
   expect(candidates('새 답변입니다 ' + words.join(' ') + ' 끝', db).length).toBe(40)
+})
+
+test('search matches term, meaning, example and other names; order sorts by time, abc or 가나다', async () => {
+  const t = (term: string, aliases: string[], meaning: string) =>
+    ({ key: normalize(term), term, aliases, meaning, example: 'e', status: 'todo' as const })
+  // stored newest first
+  const list = [
+    t('WER(Word Error Rate)', ['worderrorrate', '단어오류율'], '음성 인식 오류 비율'),
+    t('API(Application Programming Interface)', ['applicationprogramminginterface'], '프로그램끼리 부르는 약속'),
+    t('Hot reload', ['핫리로드'], '고치면 바로 반영'),
+    { ...t('CI', [], '자동 빌드'), status: 'done' as const },
+  ]
+  const names = (r: { term: string }[]) => r.map(x => x.term.split('(')[0])
+  expect(names(visible(list, 'todo', '', 'time'))).toEqual(['WER', 'API', 'Hot reload'])
+  expect(names(visible(list, 'todo', '', 'abc'))).toEqual(['API', 'Hot reload', 'WER'])
+  expect(names(visible(list, 'todo', '', 'ganada'))).toEqual(['WER', 'Hot reload', 'API']) // 단어오류율, 핫리로드, 그 뒤 한글 이름 없는 API
+  expect(names(visible(list, 'todo', 'error', 'time'))).toEqual(['WER'])
+  expect(names(visible(list, 'todo', '핫 리로드', 'time'))).toEqual(['Hot reload'])
+  expect(names(visible(list, 'todo', '반영', 'time'))).toEqual(['Hot reload'])
+  expect(names(visible(list, 'todo', 'ci', 'time'))).toEqual([]) // other tab
+  expect(names(visible(list, 'done', 'ci', 'time'))).toEqual(['CI'])
 })
