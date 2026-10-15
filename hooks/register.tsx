@@ -340,6 +340,20 @@ const TABS: { status: Status; label: string; empty: string }[] = [
   { status: 'removed', label: '제거', empty: '제거한 용어가 없습니다. 제거한 용어는 다시 추가되지 않습니다.' },
 ]
 
+// The engine may replace this module's copy mid-session (the hooks worker was lost): the
+// fresh copy keeps no timers, and the pane on screen still holds the dead copy's button
+// handles, so every press is "ui_press not handled" and a reopened pane can stay at
+// "Nothing to show yet". The first hook in a fresh copy restarts the poll and redraws.
+let isLive = false
+function revive($: EngineInterface) {
+  if (isLive) return
+  isLive = true
+  $.clock.every(POLL_MS, () => {
+    refresh($).catch(err => reportFailure($, err))
+  })
+  $.ui.invalidate('ui.render')
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
@@ -348,9 +362,7 @@ export const register: Register = on => {
       argumentHint: '[scan|stats]',
     })
     await refresh($).catch(err => reportFailure($, err))
-    $.clock.every(POLL_MS, () => {
-      refresh($).catch(err => reportFailure($, err))
-    })
+    revive($)
     return next(e)
   })
 
@@ -358,7 +370,9 @@ export const register: Register = on => {
     const arg = e.args.trim()
     if (arg === 'stats') return { text: formatUsage((await $.store.get('usage')) as Usage | undefined) }
 
+    revive($)
     await $.ui.open({ id: PANE, title: 'PM 용어' })
+    $.ui.invalidate('ui.render') // an already open pane draws again with live handles
     if (arg !== 'scan') return { text: 'PM terms pane opened.' }
 
     const answers = (await $.session.messages())
@@ -376,6 +390,7 @@ export const register: Register = on => {
 
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
+    revive($)
     if (e.agentId === undefined && e.reason === 'answer' && e.answer) {
       const answer = e.answer
       $.clock.after(0, () => {
