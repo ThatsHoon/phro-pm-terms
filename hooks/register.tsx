@@ -8,6 +8,7 @@ const terms = atom({ plugin: 'phro-pm-terms', key: 'terms' } as const, [])
 const tab = atom({ plugin: 'phro-pm-terms', key: 'tab' } as const, 'todo')
 const query = atom({ plugin: 'phro-pm-terms', key: 'query' } as const, '')
 const order = atom({ plugin: 'phro-pm-terms', key: 'order' } as const, 'time')
+const limit = atom({ plugin: 'phro-pm-terms', key: 'limit' } as const, 30)
 
 const DB_PATH = '.claude/phro-pm-terms/terms.json'
 // The file is the one source of truth shared by every session; each polls its mtime.
@@ -16,6 +17,9 @@ const MAX_CANDIDATES = 40
 const MAX_NEW = 8
 const MAX_IGNORED = 5000
 const MAX_SCAN_BATCHES = 5
+// Rows drawn at once. Every redraw rebuilds the whole tree; with 164 removed terms a burst of
+// tab presses queued redraws of ~650 elements each and the pane stopped answering.
+const PAGE = 30
 
 const STOPWORDS = new Set(
   'the and or of to in on for is are be it this that with as at by from an a if not no yes ok vs etc e g i e via per'.split(' '),
@@ -407,7 +411,11 @@ export const register: Register = on => {
     const q = await read($, query)
     const by = await read($, order)
     const shown = visible(list, current, q, by)
-    const search = (v: unknown) => update($, query, () => text(v))
+    const max = await read($, limit)
+    // A press that changes nothing writes nothing, so repeated presses queue no redraws.
+    // A new tab, search or order starts again from the first page.
+    const fresh = (write: () => Promise<unknown>) => update($, limit, () => PAGE).then(write)
+    const search = (v: unknown) => (text(v) === q ? undefined : fresh(() => update($, query, () => text(v))))
     const move = (key: string, status: Status) => () => setStatus($, key, status).catch(err => reportFailure($, err))
 
     return (
@@ -418,18 +426,21 @@ export const register: Register = on => {
               key={`tab-${t.status}`}
               label={`${t.label} (${list.filter(x => x.status === t.status).length})`}
               variant={t.status === current ? 'primary' : 'secondary'}
-              onPress={() => update($, tab, () => t.status)}
+              onPress={() => (t.status === current ? undefined : fresh(() => update($, tab, () => t.status)))}
             />
           ))}
         </Box>
         <Box>
           <Input key="search" label="검색" placeholder="용어, 뜻, 예시, 한글 이름" value={q} submitLabel="찾기" onInput={search} onSubmit={search} />
-          <Select key="order" label="정렬" options={ORDERS} value={by} onSelect={(v: unknown) => update($, order, () => (ORDERS.find(o => o.value === text(v))?.value ?? 'time'))} />
-          {q && <Button key="clear" label="검색 지우기" onPress={() => update($, query, () => '')} />}
+          <Select key="order" label="정렬" options={ORDERS} value={by} onSelect={(v: unknown) => {
+            const o = ORDERS.find(x => x.value === text(v))?.value ?? 'time'
+            return o === by ? undefined : fresh(() => update($, order, () => o))
+          }} />
+          {q && <Button key="clear" label="검색 지우기" onPress={() => fresh(() => update($, query, () => ''))} />}
         </Box>
         {q && <Text dimColor>"{q}" 검색 결과 {shown.length}개</Text>}
         {shown.length === 0 && <Text dimColor>{q ? '검색과 맞는 용어가 없습니다.' : TABS.find(t => t.status === current)!.empty}</Text>}
-        {shown.map(t => (
+        {shown.slice(0, max).map(t => (
           <Box key={`row-${t.key}`} flexDirection="column" marginTop={1}>
             <Box>
               {current === 'removed' ? (
@@ -450,6 +461,9 @@ export const register: Register = on => {
             <Text dimColor>  예) {t.example}</Text>
           </Box>
         ))}
+        {shown.length > max && (
+          <Button key="more" label={`더 보기 (${shown.length - max}개 남음)`} onPress={() => update($, limit, () => max + PAGE)} />
+        )}
       </Box>
     )
   })

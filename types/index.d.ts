@@ -28,6 +28,6 @@ export type Usage = { calls: number; failed: number; input: number; output: numb
 
 declare module 'claude-code' {
   interface PluginState {
-    'phro-pm-terms': { terms: Term[]; tab: Status; query: string; order: Order }
+    'phro-pm-terms': { terms: Term[]; tab: Status; query: string; order: Order; limit: number }
   }
 }
