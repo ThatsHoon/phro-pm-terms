@@ -2,12 +2,12 @@ import { expect, test } from 'claude-code/testing'
 
 const PANE = {
   component: 'Pane',
-  requestId: 'pm-terms',
-  props: { title: 'PM 용어', isFocused: false, bodyColumns: 60, placement: 'dock' },
+  requestId: 'term-board',
+  props: { title: '용어 보드', isFocused: false, bodyColumns: 60, placement: 'dock' },
 } as never
 
 test('tabs pressed many times at once leave the pane working', async $ => {
-  const ui = await $.ui.mount({ plugin: 'phro-pm-terms', surface: 'desktop', ...(PANE as object) } as never)
+  const ui = await $.ui.mount({ plugin: 'phro-term-board', surface: 'desktop', ...(PANE as object) } as never)
   const keys = ['tab-done', 'tab-removed', 'tab-todo', 'tab-todo']
   await Promise.allSettled(Array.from({ length: 40 }, (_, i) => ui.press({ key: keys[i % 4]! })))
   await ui.press({ key: 'tab-removed' })

@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { addUsage, candidates, emptyDb, formatUsage, initials, merge, migrate, normalize, parseReply, sameTerms, visible } from './register'
+import { addUsage, candidates, emptyDb, formatUsage, fromPmTerms, initials, merge, migrate, normalize, parseReply, sameTerms, visible } from './register'
 
 test('normalize folds case, spacing, punctuation and notes', async () => {
   expect(normalize('Hot reload')).toBe(normalize('hot-reload'))
@@ -128,4 +128,12 @@ test('search matches term, meaning, example and other names; order sorts by time
   expect(names(visible(list, 'todo', '반영', 'time'))).toEqual(['Hot reload'])
   expect(names(visible(list, 'todo', 'ci', 'time'))).toEqual([]) // other tab
   expect(names(visible(list, 'done', 'ci', 'time'))).toEqual(['CI'])
+})
+
+test('the old PM list carries its terms and tabs over but forgets what the PM rule rejected', async () => {
+  const pm = migrate({ terms: [{ key: 'api', term: 'API', aliases: [], meaning: 'm', example: 'e', isDone: true }], ignored: ['mlflow', 'kubernetes'] })
+  const board = fromPmTerms(pm)
+  expect(board.terms.map(t => [t.term, t.status])).toEqual([['API', 'done']])
+  expect(board.ignored).toEqual([])
+  expect(candidates('MLflow 와 Kubernetes 를 씁니다', board)).toEqual(['MLflow', 'Kubernetes'])
 })

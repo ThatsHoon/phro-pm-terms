@@ -3,14 +3,16 @@ import type { EngineInterface, ModelCompleteResult, Register } from 'claude-code
 
 import type { Order, Status, Term, TermsDb, Usage } from '../types'
 
-const PANE = 'pm-terms'
-const terms = atom({ plugin: 'phro-pm-terms', key: 'terms' } as const, [])
-const tab = atom({ plugin: 'phro-pm-terms', key: 'tab' } as const, 'todo')
-const query = atom({ plugin: 'phro-pm-terms', key: 'query' } as const, '')
-const order = atom({ plugin: 'phro-pm-terms', key: 'order' } as const, 'time')
-const limit = atom({ plugin: 'phro-pm-terms', key: 'limit' } as const, 30)
+const PANE = 'term-board'
+const terms = atom({ plugin: 'phro-term-board', key: 'terms' } as const, [])
+const tab = atom({ plugin: 'phro-term-board', key: 'tab' } as const, 'todo')
+const query = atom({ plugin: 'phro-term-board', key: 'query' } as const, '')
+const order = atom({ plugin: 'phro-term-board', key: 'order' } as const, 'time')
+const limit = atom({ plugin: 'phro-term-board', key: 'limit' } as const, 30)
 
-const DB_PATH = '.claude/phro-pm-terms/terms.json'
+const DB_PATH = '.claude/phro-term-board/terms.json'
+// 0.6.x and earlier (phro-pm-terms) kept the list here; read once if the new file is missing
+const OLD_DB_PATH = '.claude/phro-pm-terms/terms.json'
 // The file is the one source of truth shared by every session; each polls its mtime.
 const POLL_MS = 3000
 const MAX_CANDIDATES = 40
@@ -27,11 +29,11 @@ const STOPWORDS = new Set(
 
 // Haiku sees only the unknown candidates, never the answer text or the known list.
 // Pipe lines instead of JSON: fewer output tokens, and one bad line costs one term.
-const SYSTEM = `You curate a glossary for an IT product manager (PM).
+const SYSTEM = `You curate a glossary of AI and IT knowledge for a learner who works with engineers.
 Input: comma-separated candidate words taken from an AI coding assistant's answer.
 Rules:
-- Keep only terms a non-engineer PM gains from knowing: acronyms, tech concepts, dev-process and infra jargon.
-- Drop product, brand, repo, file, variable and function names, CLI commands and subcommands (e.g. "plugin update", "marketplace add"), generic English words, numbers.
+- Keep terms worth learning across AI and IT: AI/ML concepts and methods (e.g. LoRA, RAG, quantization, beam search), metrics, model types, data and infra, networking, security, dev-process jargon, protocols and standards, and widely used technologies, frameworks and services (e.g. Kubernetes, MLflow, CUDA).
+- Drop names that only matter inside this one project (its repos, files, variables, functions, internal model or run names), CLI commands and subcommands (e.g. "plugin update", "marketplace add"), generic English words, numbers.
 - Use only the given candidates; never add terms that are not among them.
 - Merge candidates that name the same thing (e.g. "hot", "reload" -> "Hot reload"; "CI" + "Continuous Integration") into one term.
 - At most ${MAX_NEW} terms. Output nothing else.
@@ -121,7 +123,7 @@ export function parseReply(text: string): Parsed[] {
 }
 
 /** "Continuous Integration" -> "ci": lets an acronym and its spelled-out form meet. */
-// ponytail: initials can collide (Hot reload vs HR); fine for a PM glossary, drop if it misfires
+// ponytail: initials can collide (Hot reload vs HR); fine for a glossary, drop if it misfires
 export function initials(term: string): string | undefined {
   // "WER(Word Error Rate)": the name is WER; its full name becomes an alias in merge()
   const words = term.replace(/\([^)]*\)/g, ' ').split(/[\s-]+/).filter(w => /^[A-Za-z]/.test(w))
@@ -182,10 +184,10 @@ export function formatUsage(u: Usage | undefined): string {
   )
 }
 
-async function dbPath($: EngineInterface): Promise<string> {
+async function dbPath($: EngineInterface, rel = DB_PATH): Promise<string> {
   const home = (await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME'))
   if (!home) throw new Error('neither USERPROFILE nor HOME is set')
-  return `${home}/${DB_PATH}`
+  return `${home}/${rel}`
 }
 
 /** Older files carried `isDone` instead of `status`. */
@@ -199,15 +201,27 @@ export function migrate(raw: { terms?: StoredTerm[]; ignored?: string[] }): Term
   return { version: 1, terms, ignored: raw.ignored ?? [] }
 }
 
-async function load($: EngineInterface): Promise<TermsDb> {
-  const path = await dbPath($)
-  const exists = await $.fs.stat(path).then(
+/**
+ * The PM-only list carried into the wider board: its terms and tabs stay, its `ignored` goes,
+ * because those words were judged against the narrower PM rule and may qualify now.
+ */
+export function fromPmTerms(db: TermsDb): TermsDb {
+  return { ...db, ignored: [] }
+}
+
+const isFile = ($: EngineInterface, path: string) =>
+  $.fs.stat(path).then(
     () => true,
     () => false,
   )
-  if (!exists) return emptyDb()
+
+async function load($: EngineInterface): Promise<TermsDb> {
+  const path = await dbPath($)
   // a corrupt file throws here, so nothing below ever overwrites it with an empty list
-  return migrate(JSON.parse(await $.fs.read(path)))
+  if (await isFile($, path)) return migrate(JSON.parse(await $.fs.read(path)))
+  const old = await dbPath($, OLD_DB_PATH)
+  if (await isFile($, old)) return fromPmTerms(migrate(JSON.parse(await $.fs.read(old))))
+  return emptyDb()
 }
 
 // mtime of the file as this session last read or wrote it; another session's write moves it
@@ -283,7 +297,7 @@ async function extract($: EngineInterface, text: string): Promise<number> {
     await save($, db)
     return added
   })
-  if (added > 0) $.ui.toast(`📘 PM 용어 ${added}개 추가 — /pm-terms`)
+  if (added > 0) $.ui.toast(`📘 용어 ${added}개 추가 — /term-board`)
   return added
 }
 
@@ -296,7 +310,7 @@ function setStatus($: EngineInterface, key: string, status: Status): Promise<voi
 }
 
 function reportFailure($: EngineInterface, err: unknown) {
-  $.ui.toast(`pm-terms: ${DB_PATH} 를 읽거나 쓰지 못했습니다 (${String(err).slice(0, 120)})`)
+  $.ui.toast(`term-board: ${DB_PATH} 를 읽거나 쓰지 못했습니다 (${String(err).slice(0, 120)})`)
 }
 
 const ORDERS: { value: Order; label: string }[] = [
@@ -339,7 +353,7 @@ const text = (v: unknown): string =>
   typeof v === 'string' ? v : typeof (v as { value?: unknown })?.value === 'string' ? (v as { value: string }).value : ''
 
 const TABS: { status: Status; label: string; empty: string }[] = [
-  { status: 'todo', label: '배울 용어', empty: '아직 용어가 없습니다. /pm-terms scan 으로 이 세션을 훑어보세요.' },
+  { status: 'todo', label: '배울 용어', empty: '아직 용어가 없습니다. /term-board scan 으로 이 세션을 훑어보세요.' },
   { status: 'done', label: '보관', empty: '보관한 용어가 없습니다.' },
   { status: 'removed', label: '제거', empty: '제거한 용어가 없습니다. 제거한 용어는 다시 추가되지 않습니다.' },
 ]
@@ -361,8 +375,8 @@ function revive($: EngineInterface) {
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
-      name: 'pm-terms',
-      description: 'Open the PM terms checklist ("scan" extracts from this session, "stats" shows Haiku token use)',
+      name: 'term-board',
+      description: 'Open the AI/IT term board ("scan" extracts from this session, "stats" shows Haiku token use)',
       argumentHint: '[scan|stats]',
     })
     await refresh($).catch(err => reportFailure($, err))
@@ -370,14 +384,14 @@ export const register: Register = on => {
     return next(e)
   })
 
-  on('command.run', { command: 'pm-terms' }, async ($, e) => {
+  on('command.run', { command: 'term-board' }, async ($, e) => {
     const arg = e.args.trim()
     if (arg === 'stats') return { text: formatUsage((await $.store.get('usage')) as Usage | undefined) }
 
     revive($)
-    await $.ui.open({ id: PANE, title: 'PM 용어' })
+    await $.ui.open({ id: PANE, title: '용어 보드' })
     $.ui.invalidate('ui.render') // an already open pane draws again with live handles
-    if (arg !== 'scan') return { text: 'PM terms pane opened.' }
+    if (arg !== 'scan') return { text: 'Term board opened.' }
 
     const answers = (await $.session.messages())
       .filter(m => m.role === 'assistant' && m.text)
@@ -389,7 +403,7 @@ export const register: Register = on => {
       if (added < 0) break
       total += added
     }
-    return { text: `Scanned this session: ${total} new PM terms.` }
+    return { text: `Scanned this session: ${total} new terms.` }
   })
 
   on('turn.complete', async ($, e, next) => {

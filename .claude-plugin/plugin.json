@@ -1,8 +1,8 @@
 {
-  "name": "phro-pm-terms",
-  "version": "0.6.2",
+  "name": "phro-term-board",
+  "version": "0.7.0",
   "license": "MIT",
-  "description": "Collects IT terms and acronyms a PM should know from Claude's answers into a checklist pane; checked items move to an archive.",
+  "description": "Collects AI and IT terms, concepts and technologies from Claude's answers into a term board pane; checked items move to an archive.",
   "author": {
     "name": "thatshoon"
   },

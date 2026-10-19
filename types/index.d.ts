@@ -12,11 +12,11 @@ export type Term = {
   status: Status
 }
 
-/** ~/.claude/phro-pm-terms/terms.json */
+/** ~/.claude/phro-term-board/terms.json */
 export type TermsDb = {
   version: 1
   terms: Term[]
-  /** normalized candidates Haiku already judged not PM-worthy; never sent again */
+  /** normalized candidates Haiku already judged not worth keeping; never sent again */
   ignored: string[]
 }
 
@@ -28,6 +28,6 @@ export type Usage = { calls: number; failed: number; input: number; output: numb
 
 declare module 'claude-code' {
   interface PluginState {
-    'phro-pm-terms': { terms: Term[]; tab: Status; query: string; order: Order; limit: number }
+    'phro-term-board': { terms: Term[]; tab: Status; query: string; order: Order; limit: number }
   }
 }
